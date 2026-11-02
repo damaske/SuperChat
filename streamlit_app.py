@@ -36,10 +36,12 @@ with st.sidebar:
     st.divider()
     st.caption("Demo version — uses mock data. No real payments or bookings.")
 
+# Display conversation history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.text(message["content"])
 
+# User input
 prompt = st.chat_input("Ask about flights, products or movies...")
 
 if prompt:
@@ -50,13 +52,24 @@ if prompt:
 
     output = StringIO()
 
-    with redirect_stdout(output):
-        st.session_state.superchat.handle_message(prompt)
+    try:
+        with redirect_stdout(output):
+            st.session_state.superchat.handle_message(prompt)
 
-    answer = output.getvalue().strip()
+        # Hide internal Router debug messages
+        visible_lines = [
+            line
+            for line in output.getvalue().splitlines()
+            if not line.strip().startswith("[Router]")
+        ]
 
-    if not answer:
-        answer = "I couldn't generate a response. Please try again."
+        answer = "\n".join(visible_lines).strip()
+
+        if not answer:
+            answer = "I couldn't generate a response. Please try again."
+
+    except Exception as error:
+        answer = f"Something went wrong: {error}"
 
     st.session_state.messages.append({
         "role": "assistant",
