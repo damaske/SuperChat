@@ -8,10 +8,14 @@ class FlightRepository:
         origin: str = None,
         destination: str = None,
         date: str = None,
+        return_date: str = None,
         max_price: float = None,
         max_stops: int = None,
-        cabin: str = None
+        cabin: str = None,
+        passengers: int = None,
+        currency: str = "AZN",
     ) -> list:
+        del return_date, passengers, currency
 
         results = self.flights
 

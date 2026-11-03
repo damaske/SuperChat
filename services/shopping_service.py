@@ -10,8 +10,11 @@ class ShoppingService:
         category=None,
         brand=None,
         max_price=None,
+        min_price=None,
         min_rating=None,
-        in_stock=None
+        in_stock=None,
+        sort=None,
+        condition=None
     ):
         """Search products and save results in the user's session."""
 
@@ -20,8 +23,11 @@ class ShoppingService:
             category=category,
             brand=brand,
             max_price=max_price,
+            min_price=min_price,
             min_rating=min_rating,
-            in_stock=in_stock
+            in_stock=in_stock,
+            sort=sort,
+            condition=condition,
         )
 
         session.shopping.search_params = {
@@ -29,8 +35,11 @@ class ShoppingService:
             "category": category,
             "brand": brand,
             "max_price": max_price,
+            "min_price": min_price,
             "min_rating": min_rating,
-            "in_stock": in_stock
+            "in_stock": in_stock,
+            "sort": sort,
+            "condition": condition,
         }
 
         session.shopping.results = results
@@ -78,6 +87,12 @@ class ShoppingService:
 
         current_quantity = session.shopping.cart.get(product_id, 0)
         new_quantity = current_quantity + quantity
+
+        if product.get("stock") is None:
+            return {
+                "success": False,
+                "message": "Stock availability is not provided for this listing."
+            }
 
         if new_quantity > product["stock"]:
             return {
@@ -137,7 +152,10 @@ class ShoppingService:
             if product is None:
                 continue
 
-            subtotal = round(product["price_azn"] * quantity, 2)
+            price = product.get("price", product.get("price_azn"))
+            if price is None:
+                continue
+            subtotal = round(price * quantity, 2)
             total += subtotal
 
             items.append({
@@ -149,5 +167,6 @@ class ShoppingService:
         return {
             "items": items,
             "total": round(total, 2),
-            "currency": "AZN"
+            "currency": items[0]["product"].get("currency", "AZN")
+            if items else "AZN"
         }

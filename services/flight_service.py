@@ -12,9 +12,12 @@ class FlightService:
         origin=None,
         destination=None,
         date=None,
+        return_date=None,
         max_price=None,
         max_stops=None,
-        cabin=None
+        cabin=None,
+        passengers=None,
+        currency="USD",
     ):
         """Search flights and save results in the user's session."""
 
@@ -22,18 +25,24 @@ class FlightService:
             origin=origin,
             destination=destination,
             date=date,
+            return_date=return_date,
             max_price=max_price,
             max_stops=max_stops,
-            cabin=cabin
+            cabin=cabin,
+            passengers=passengers,
+            currency=currency,
         )
 
         session.flights.search_params = {
             "origin": origin,
             "destination": destination,
             "date": date,
+            "return_date": return_date,
             "max_price": max_price,
             "max_stops": max_stops,
-            "cabin": cabin
+            "cabin": cabin,
+            "passengers": passengers,
+            "currency": currency,
         }
 
         session.flights.results = results
@@ -73,7 +82,7 @@ class FlightService:
                 "message": "Please select a flight first."
             }
 
-        if flight.get("seats_available", 0) <= 0:
+        if flight.get("seats_available") == 0:
             return {
                 "success": False,
                 "message": "No seats are available for this flight."
@@ -82,8 +91,8 @@ class FlightService:
         reservation = {
             "reservation_id": str(uuid4())[:8].upper(),
             "flight_id": flight["id"],
-            "airline": flight["airline"],
-            "flight_number": flight["flight_number"],
+            "airline": flight.get("airline"),
+            "flight_number": flight.get("flight_number"),
             "status": "confirmed",
             "payment_status": "not_required_mock"
         }

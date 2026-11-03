@@ -2,8 +2,36 @@
 import streamlit as st
 from contextlib import redirect_stdout
 from io import StringIO
+import re
 
 from app import SuperChat
+from integrations.aviasales import AviasalesAPIError
+
+
+def render_answer(answer: str) -> None:
+    """Render Aviasales links as clickable links."""
+
+    rendered_lines = []
+    for line in answer.splitlines():
+        match = re.match(
+            r"^(?P<label>\s*Ссылка Aviasales:\s*)(?P<url>https?://\S+)\s*$",
+            line,
+        )
+        if match:
+            url = match.group("url")
+            rendered_lines.append(
+                f"{match.group('label')}[{url}]({url})"
+            )
+        elif line.strip().startswith("Ссылка eBay: "):
+            url = line.split(":", 1)[1].strip()
+            rendered_lines.append(f"[Открыть товар на eBay]({url})")
+        elif line.strip().startswith("Изображение: "):
+            url = line.split(":", 1)[1].strip()
+            rendered_lines.append(f"![Изображение товара]({url})")
+        else:
+            rendered_lines.append(line)
+
+    st.markdown("\n\n".join(rendered_lines))
 
 
 st.set_page_config(
@@ -16,7 +44,11 @@ st.title("💬 SuperChat")
 st.caption("Your conversational assistant — Flights, Shopping & Cinema")
 
 if "superchat" not in st.session_state:
-    st.session_state.superchat = SuperChat()
+    try:
+        st.session_state.superchat = SuperChat()
+    except AviasalesAPIError as error:
+        st.error(f"Aviasales configuration error: {error}")
+        st.stop()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -34,12 +66,15 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption("Demo version — uses mock data. No real payments or bookings.")
+    st.caption(
+        "Flight prices use Aviasales cached Data API data. "
+        "No real bookings or payments."
+    )
 
 # Display conversation history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.text(message["content"])
+        render_answer(message["content"])
 
 # User input
 prompt = st.chat_input("Ask about flights, products or movies...")

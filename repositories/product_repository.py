@@ -9,8 +9,11 @@ class ProductRepository:
         category: str = None,
         brand: str = None,
         max_price: float = None,
+        min_price: float = None,
         min_rating: float = None,
-        in_stock: bool = None
+        in_stock: bool = None,
+        sort: str = None,
+        condition: str = None
     ) -> list:
 
         results = self.products
@@ -42,6 +45,12 @@ class ProductRepository:
             results = [
                 product for product in results
                 if product["price_azn"] <= max_price
+            ]
+
+        if min_price is not None:
+            results = [
+                product for product in results
+                if product["price_azn"] >= min_price
             ]
 
         if min_rating is not None:
