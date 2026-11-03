@@ -1,5 +1,10 @@
 
 import re
+import logging
+import time
+from contextlib import redirect_stdout
+from datetime import date, datetime, timedelta
+from io import StringIO
 
 from agents.llm_router import LLMRouter
 from integrations.aviasales import (
@@ -8,15 +13,15 @@ from integrations.aviasales import (
     AviasalesFlightRepository,
 )
 from integrations.serpapi import SerpApiClient, SerpApiError, SerpApiProductRepository
+from integrations.cinemaplus import CinemaPlusAPIError, CinemaPlusClient, CinemaPlusRepository
 from models.session_state import SessionState
-
-from repositories.data_loader import load_all_data
-from repositories.movie_repository import MovieRepository
-from repositories.cinema_repository import CinemaRepository
 
 from services.flight_service import FlightService
 from services.shopping_service import ShoppingService
 from services.cinema_service import CinemaService
+from language import detect_language
+
+logger = logging.getLogger("superchat")
 
 
 class SuperChat:
@@ -51,7 +56,6 @@ class SuperChat:
     }
 
     def __init__(self):
-        self.data = load_all_data()
         self.session = SessionState()
         self.router = LLMRouter()
 
@@ -63,13 +67,10 @@ class SuperChat:
             SerpApiProductRepository(SerpApiClient())
         )
 
+        cinema_repository = CinemaPlusRepository(CinemaPlusClient())
         self.cinema_service = CinemaService(
-            MovieRepository(self.data["movies"]),
-            CinemaRepository(
-                self.data["movies"],
-                self.data["cinemas"],
-                self.data["showtimes"],
-            ),
+            cinema_repository,
+            cinema_repository,
         )
 
     # --------------------------------------------------
@@ -144,6 +145,166 @@ class SuperChat:
     def _set_active_domain(self, domain: str):
         self.session.last_active_domain = domain
 
+    def _set_request_language(self, message: str, detected: str | None = None):
+        language = detected or detect_language(message)
+        if language:
+            self.session.language = language
+
+    def _localize_output(self, output: str) -> str:
+        language = self.session.language
+        if language == "ru":
+            return output
+
+        translations = {
+            "Не найдено подходящих авиабилетов.": {
+                "en": "No suitable flights were found.",
+                "az": "Uyğun uçuş tapılmadı.",
+            },
+            "Найденные товары:": {
+                "en": "Products found:",
+                "az": "Tapılan məhsullar:",
+            },
+            "Найденные фильмы:": {
+                "en": "Movies found:",
+                "az": "Tapılan filmlər:",
+            },
+            "Доступные сеансы:": {
+                "en": "Available sessions:",
+                "az": "Mövcud seanslar:",
+            },
+            "Подходящие фильмы не найдены.": {
+                "en": "No matching movies were found.",
+                "az": "Uyğun film tapılmadı.",
+            },
+            "Подходящих сеансов не найдено.": {
+                "en": "No matching sessions were found.",
+                "az": "Uyğun seans tapılmadı.",
+            },
+            "Чтобы выбрать товар, напишите его ID,": {
+                "en": "To select a product, send its ID,",
+                "az": "Məhsulu seçmək üçün ID-ni yazın,",
+            },
+            "Чтобы выбрать фильм, напишите его ID,": {
+                "en": "To select a movie, send its ID,",
+                "az": "Filmi seçmək üçün ID-ni yazın,",
+            },
+            "Чтобы выбрать сеанс, напишите его ID,": {
+                "en": "To select a session, send its ID,",
+                "az": "Seansı seçmək üçün ID-ni yazın,",
+            },
+            "Чтобы добавить товар в корзину: добавь P001 2": {
+                "en": "To add a product to the cart: add P001 2",
+                "az": "Məhsulu səbətə əlavə etmək üçün: add P001 2",
+            },
+            "Состояние": {"en": "Condition", "az": "Vəziyyət"},
+            "Продавец": {"en": "Seller", "az": "Satıcı"},
+            "Доставка": {"en": "Shipping", "az": "Çatdırılma"},
+            "Рейтинг": {"en": "Rating", "az": "Reytinq"},
+            "Отзывы": {"en": "Reviews", "az": "Rəylər"},
+            "Описание": {"en": "Description", "az": "Təsvir"},
+            "Цена": {"en": "Price", "az": "Qiymət"},
+            "Вылет": {"en": "Departure", "az": "Uçuş"},
+            "Остановки": {"en": "Stops", "az": "Dayanacaqlar"},
+            "Мест:": {"en": "Seats:", "az": "Yerlər:"},
+            "Ссылка Aviasales:": {"en": "Aviasales link:", "az": "Aviasales linki:"},
+            "Ссылка eBay:": {"en": "eBay link:", "az": "eBay linki:"},
+            "Официальная страница CinemaPlus:": {
+                "en": "Official CinemaPlus page:",
+                "az": "CinemaPlus rəsmi səhifəsi:",
+            },
+            "Покупка через SuperChat недоступна; используйте официальный сайт CinemaPlus.": {
+                "en": "Purchasing through SuperChat is unavailable; use the official CinemaPlus site.",
+                "az": "SuperChat ilə alış mümkün deyil; CinemaPlus rəsmi saytından istifadə edin.",
+            },
+            "Не удалось определить направление запроса.": {
+                "en": "I could not determine the request domain.",
+                "az": "Sorğunun istiqamətini müəyyən etmək olmadı.",
+            },
+            "Я могу помочь с авиабилетами, покупками и поиском фильмов и киносеансов.": {
+                "en": "I can help with flights, shopping, and finding movies and cinema sessions.",
+                "az": "Uçuşlar, alış-veriş, filmlər və kino seanslarında kömək edə bilərəm.",
+            },
+            "Уточните, пожалуйста, ваш запрос.": {
+                "en": "Please clarify your request.",
+                "az": "Zəhmət olmasa, sorğunuzu dəqiqləşdirin.",
+            },
+            "Сначала найдите авиабилеты.": {
+                "en": "Please search for flights first.",
+                "az": "Əvvəlcə uçuş axtarın.",
+            },
+            "Сначала найдите товары.": {
+                "en": "Please search for products first.",
+                "az": "Əvvəlcə məhsul axtarın.",
+            },
+            "Сначала найдите фильмы или сеансы.": {
+                "en": "Please search for movies or sessions first.",
+                "az": "Əvvəlcə film və ya seans axtarın.",
+            },
+            "Не удалось получить данные Aviasales:": {
+                "en": "Could not retrieve Aviasales data:",
+                "az": "Aviasales məlumatlarını almaq olmadı:",
+            },
+            "Не удалось получить товары из eBay через SerpApi:": {
+                "en": "Could not retrieve products from eBay through SerpApi:",
+                "az": "SerpApi vasitəsilə eBay məhsullarını almaq olmadı:",
+            },
+            "Не удалось получить данные CinemaPlus:": {
+                "en": "Could not retrieve CinemaPlus data:",
+                "az": "CinemaPlus məlumatlarını almaq olmadı:",
+            },
+            "Ваша корзина:": {"en": "Your cart:", "az": "Səbətiniz:"},
+            "Корзина пока пуста.": {"en": "Your cart is empty.", "az": "Səbət boşdur."},
+            "Итого:": {"en": "Total:", "az": "Cəmi:"},
+            "Сначала найдите товары.": {
+                "en": "Please search for products first.",
+                "az": "Əvvəlcə məhsul axtarın.",
+            },
+            "Сначала найдите авиабилеты.": {
+                "en": "Please search for flights first.",
+                "az": "Əvvəlcə uçuş axtarın.",
+            },
+            "Для сравнения нужны минимум два товара.": {
+                "en": "At least two products are needed for comparison.",
+                "az": "Müqayisə üçün ən azı iki məhsul lazımdır.",
+            },
+            "Для сравнения нужны минимум два варианта.": {
+                "en": "At least two options are needed for comparison.",
+                "az": "Müqayisə üçün ən azı iki seçim lazımdır.",
+            },
+            "Сравнение первых двух товаров:": {
+                "en": "Comparison of the first two products:",
+                "az": "İlk iki məhsulun müqayisəsi:",
+            },
+            "Сравнение вариантов перелёта:": {
+                "en": "Comparison of flight options:",
+                "az": "Uçuş seçimlərinin müqayisəsi:",
+            },
+            "Укажите номер товара, например: первый товар.": {
+                "en": "Specify a product number, for example: the first product.",
+                "az": "Məhsul nömrəsini göstərin, məsələn: birinci məhsul.",
+            },
+            "Какой товар вы имеете в виду?": {
+                "en": "Which product do you mean?",
+                "az": "Hansı məhsulu nəzərdə tutursunuz?",
+            },
+            "В результатах нет числовых цен для такой сортировки.": {
+                "en": "The results contain no numeric prices for this sorting.",
+                "az": "Bu çeşidləmə üçün nəticələrdə rəqəmsal qiymət yoxdur.",
+            },
+            "Не удалось получить схему выбранного зала.": {
+                "en": "Could not retrieve the selected hall layout.",
+                "az": "Seçilmiş zalın sxemini almaq olmadı.",
+            },
+            "Сначала найдите фильмы.": {
+                "en": "Please search for movies first.",
+                "az": "Əvvəlcə film axtarın.",
+            },
+        }
+        localized = output
+        for source, values in translations.items():
+            localized = localized.replace(source, values[language])
+        return localized
+
     # --------------------------------------------------
     # OUTPUT
     # --------------------------------------------------
@@ -179,6 +340,25 @@ class SuperChat:
             "\nЦены получены из кэша Aviasales и могут измениться. "
             "Data API не гарантирует наличие мест."
         )
+
+    @staticmethod
+    def _print_flight_details(flight):
+        print(
+            f"\nДетали рейса {flight['id']}: "
+            f"{flight['origin']['code']} → {flight['destination']['code']}"
+        )
+        print(f"Цена: {flight['price']} {flight['currency']}")
+        if flight.get("departure_local"):
+            print(f"Вылет: {flight['departure_local']}")
+        if flight.get("airline") or flight.get("flight_number"):
+            print(
+                f"Перевозчик/рейс: {flight.get('airline') or 'не указан'} "
+                f"{flight.get('flight_number') or ''}".rstrip()
+            )
+        if flight.get("stops") is not None:
+            print(f"Остановки: {flight['stops']}")
+        if flight.get("link"):
+            print(f"Ссылка Aviasales: {flight['link']}")
 
     def print_products(self, products):
         if not products:
@@ -279,8 +459,20 @@ class SuperChat:
                 f"{showtime['date']} "
                 f"{showtime['time']} | "
                 f"{showtime['price_azn']} AZN | "
-                f"Мест: {showtime['seats_available']}"
+                f"Мест: {showtime.get('seats_available') if showtime.get('seats_available') is not None else 'не указано'}"
             )
+            if showtime.get("purchase_url"):
+                print(f"  Ссылка на покупку: {showtime['purchase_url']}")
+            elif showtime.get("external"):
+                print(
+                    "  Покупка через SuperChat недоступна; "
+                    "используйте официальный сайт CinemaPlus."
+                )
+            if item.get("movie", {}).get("url"):
+                print(
+                    f"  Официальная страница CinemaPlus: "
+                    f"{item['movie']['url']}"
+                )
 
         print(
             "\nЧтобы выбрать сеанс, напишите его ID, "
@@ -376,6 +568,7 @@ class SuperChat:
                 "min_rating": entities.get("min_rating"),
                 "in_stock": entities.get("in_stock"),
                 "condition": entities.get("condition"),
+                "sort": entities.get("sort"),
             },
         )
 
@@ -402,6 +595,7 @@ class SuperChat:
                         "min_rating",
                         "in_stock",
                         "condition",
+                        "sort",
                     },
                 ),
             )
@@ -409,10 +603,10 @@ class SuperChat:
             print(f"\nНе удалось получить товары из eBay через SerpApi: {error}")
             return
 
-        if entities.get("in_stock") is not None:
+        if entities.get("in_stock") is True:
             print(
-                "\nSerpApi/eBay не предоставляет надёжный общий фильтр "
-                "остатка для этих результатов; фильтр не применён."
+                "\nФильтр наличия применён только к объявлениям, "
+                "для которых eBay вернул положительный stock."
             )
         if entities.get("condition"):
             print(
@@ -454,20 +648,30 @@ class SuperChat:
             self.session.cinema.search_params = params
             self._set_active_domain("cinema")
 
-            results = self.cinema_service.search_showtimes(
-                self.session,
-                **self._clean_params(
-                    params,
-                    {
-                        "movie_title",
-                        "cinema_name",
-                        "district",
-                        "date",
-                        "max_price",
-                        "min_seats",
-                    },
-                ),
-            )
+            if params.get("district"):
+                print(
+                    "\nCinemaPlus не передаёт район в расписании; "
+                    "фильтр по району не применён."
+                )
+
+            try:
+                results = self.cinema_service.search_showtimes(
+                    self.session,
+                    **self._clean_params(
+                        params,
+                        {
+                            "movie_title",
+                            "cinema_name",
+                            "district",
+                            "date",
+                            "max_price",
+                            "min_seats",
+                        },
+                    ),
+                )
+            except CinemaPlusAPIError as error:
+                print(f"\nНе удалось получить данные CinemaPlus: {error}")
+                return
 
             self.print_showtimes(results)
 
@@ -486,19 +690,23 @@ class SuperChat:
             self.session.cinema.search_params = params
             self._set_active_domain("cinema")
 
-            results = self.cinema_service.search_movies(
-                self.session,
-                **self._clean_params(
-                    params,
-                    {
-                        "query",
-                        "genre",
-                        "language",
-                        "age_rating",
-                        "min_rating",
-                    },
-                ),
-            )
+            try:
+                results = self.cinema_service.search_movies(
+                    self.session,
+                    **self._clean_params(
+                        params,
+                        {
+                            "query",
+                            "genre",
+                            "language",
+                            "age_rating",
+                            "min_rating",
+                        },
+                    ),
+                )
+            except CinemaPlusAPIError as error:
+                print(f"\nНе удалось получить данные CinemaPlus: {error}")
+                return
 
             self.print_movies(results)
 
@@ -511,6 +719,7 @@ class SuperChat:
         index = self._ordinal_index(text)
 
         if "shopping" in domains:
+            self._set_active_domain("shopping")
             products = self.session.shopping.results
 
             if intent in {"search_products", "check_stock"}:
@@ -615,7 +824,33 @@ class SuperChat:
             return
 
         if "flights" in domains:
+            self._set_active_domain("flights")
             flights = self.session.flights.results
+
+            if intent == "compare_flights" or "compar" in text or "сравн" in text:
+                if len(flights) < 2:
+                    print("Для сравнения нужны минимум два варианта.")
+                    return
+                print("\nСравнение вариантов перелёта:")
+                for flight in flights[:2]:
+                    print(
+                        f"{flight['id']} | "
+                        f"{flight['origin']['code']} → "
+                        f"{flight['destination']['code']} | "
+                        f"{flight['price']} {flight['currency']} | "
+                        f"{flight.get('airline') or 'перевозчик не указан'} | "
+                        f"{flight.get('stops') if flight.get('stops') is not None else 'остановки не указаны'} остановок"
+                    )
+                return
+
+            if any(word in text for word in ("detail", "подроб", "инфо")):
+                if not flights:
+                    print("Сначала найдите авиабилеты.")
+                    return
+                selected = self.session.flights.selected_flight
+                flight = selected or flights[0]
+                self._print_flight_details(flight)
+                return
 
             if intent in {"search_flights", "compare_flights"}:
                 self.search_flights(
@@ -651,6 +886,57 @@ class SuperChat:
             return
 
         if "cinema" in domains:
+            self._set_active_domain("cinema")
+            showtimes = self.session.cinema.showtimes
+
+            if showtimes and any(
+                word in text
+                for word in ("дешев", "cheaper", "cheapest", "сравн")
+            ):
+                self.print_showtimes(
+                    sorted(
+                        showtimes,
+                        key=lambda item: (
+                            item["showtime"].get("price_azn") is None,
+                            item["showtime"].get("price_azn") or 0,
+                        ),
+                    )
+                )
+                return
+
+            if showtimes and any(
+                word in text for word in ("tomorrow", "завтра")
+            ):
+                current = self.session.cinema.search_params.get("date")
+                try:
+                    next_date = (
+                        datetime.fromisoformat(current).date()
+                        + timedelta(days=1)
+                    ).isoformat()
+                except (TypeError, ValueError):
+                    next_date = (date.today() + timedelta(days=1)).isoformat()
+                params = self._entities_to_dict_from_session()
+                params["showtime_date"] = next_date
+                self.search_cinema(params, "search_showtimes")
+                return
+
+            if showtimes and any(
+                word in text
+                for word in ("seat", "мест", "available", "доступн")
+            ):
+                selected = self.session.cinema.selected_showtime
+                target = selected or showtimes[0]["showtime"]
+                seats = self.cinema_service.get_available_seats(
+                    self.session, target["id"]
+                )
+                if seats is None:
+                    print("Не удалось получить схему выбранного зала.")
+                else:
+                    print(
+                        f"Для сеанса {target['id']} доступно мест: {seats}."
+                    )
+                return
+
             movies = self.session.cinema.movies
 
             if intent in {"search_movies", "search_showtimes"}:
@@ -731,7 +1017,7 @@ class SuperChat:
 
     def handle_selection(self, text):
         match = re.search(
-            r"\b(F\d{3}|P\d{3}|M\d{3}|S\d{3})\b",
+            r"\b(F\d{3}|P\d{3}|M\d{3}|S\d{3}|AV-[A-F0-9]+|\d{6,})\b",
             text.upper(),
         )
 
@@ -740,7 +1026,7 @@ class SuperChat:
 
         item_id = match.group(1)
 
-        if item_id.startswith("F"):
+        if item_id.startswith("AV-") or item_id.startswith("F"):
             item = self.flight_service.select_flight(
                 self.session,
                 item_id,
@@ -752,7 +1038,11 @@ class SuperChat:
                 else "Рейс не найден."
             )
 
-        elif item_id.startswith("P"):
+        elif (
+            item_id.startswith("P")
+            or item_id.isdigit()
+            or item_id.startswith("EBAY-")
+        ):
             item = self.shopping_service.select_product(
                 self.session,
                 item_id,
@@ -796,11 +1086,10 @@ class SuperChat:
 
     def handle_cart(self, text):
         match = re.search(
-            r"(?:добавь|add)\s+(P\d{3})(?:\s+(\d+))?",
+            r"(?:добавь|add)\s+(P\d{3}|AV-\w+|\d{6,})(?:\s+(\d+))?",
             text,
             re.IGNORECASE,
         )
-
         if match:
             product_id = match.group(1).upper()
             quantity = int(match.group(2) or 1)
@@ -811,6 +1100,20 @@ class SuperChat:
                 quantity,
             )
 
+            print(result["message"])
+            return True
+
+        match = re.search(
+            r"(?:удали|remove)\s+(P\d{3}|AV-\w+|\d{6,})(?:\s+(\d+))?",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            product_id = match.group(1).upper()
+            quantity = int(match.group(2)) if match.group(2) else None
+            result = self.shopping_service.remove_from_cart(
+                self.session, product_id, quantity
+            )
             print(result["message"])
             return True
 
@@ -833,7 +1136,7 @@ class SuperChat:
                         f"{item['subtotal']} AZN"
                     )
 
-                print(f"Итого: {cart['total']} AZN")
+                print(f"Итого: {cart['total']} {cart['currency']}")
 
             return True
 
@@ -866,32 +1169,16 @@ class SuperChat:
             return True
 
         if domain == "cinema":
-            match = re.search(
-                r"\b(\d+)\s*(?:мест|билет|seat|ticket)",
-                text,
+            print(
+                "\nCinemaPlus integration is read-only. "
+                "Use the official CinemaPlus site for ticket purchases."
             )
-
-            seats = int(match.group(1)) if match else 1
-
-            result = self.cinema_service.reserve_selected_showtime(
-                self.session,
-                seats,
-            )
-
-            print("\n[ДЕМО-БРОНИРОВАНИЕ]")
-            print(result["message"])
-
-            if result["success"]:
-                print(
-                    "Это локальная демонстрационная операция. "
-                    "Реальная оплата и бронирование не выполнялись."
-                )
-
-                print("Данные:", result["reservation"])
-
             return True
 
-        print("Сначала выберите рейс или киносеанс.")
+        print(
+            "\nReal reservations are not supported by the configured "
+            "providers."
+        )
         return True
 
     # --------------------------------------------------
@@ -899,6 +1186,15 @@ class SuperChat:
     # --------------------------------------------------
 
     def handle_message(self, message):
+        self._set_request_language(message)
+        output = StringIO()
+        with redirect_stdout(output):
+            self._handle_message_impl(message)
+        localized = self._localize_output(output.getvalue())
+        if localized:
+            print(localized, end="" if localized.endswith("\n") else "\n")
+
+    def _handle_message_impl(self, message):
         text = message.strip()
 
         if not text:
@@ -913,9 +1209,15 @@ class SuperChat:
         if self.handle_booking(text):
             return
 
+        started = time.monotonic()
         decision = self.router.classify(
             message,
             self.session,
+        )
+        logger.info(
+            "request domain=%s status=classified duration_ms=%d",
+            ",".join(decision.domains) or "unknown",
+            (time.monotonic() - started) * 1000,
         )
 
         entities = self._entities_to_dict(decision)

@@ -6,6 +6,7 @@ import re
 
 from app import SuperChat
 from integrations.aviasales import AviasalesAPIError
+from integrations.serpapi import SerpApiError
 
 
 def render_answer(answer: str) -> None:
@@ -28,6 +29,11 @@ def render_answer(answer: str) -> None:
         elif line.strip().startswith("Изображение: "):
             url = line.split(":", 1)[1].strip()
             rendered_lines.append(f"![Изображение товара]({url})")
+        elif line.strip().startswith("Официальная страница CinemaPlus: "):
+            url = line.split(":", 1)[1].strip()
+            rendered_lines.append(
+                f"[Открыть CinemaPlus]({url})"
+            )
         else:
             rendered_lines.append(line)
 
@@ -46,8 +52,8 @@ st.caption("Your conversational assistant — Flights, Shopping & Cinema")
 if "superchat" not in st.session_state:
     try:
         st.session_state.superchat = SuperChat()
-    except AviasalesAPIError as error:
-        st.error(f"Aviasales configuration error: {error}")
+    except (AviasalesAPIError, SerpApiError, ValueError) as error:
+        st.error(f"Application configuration error: {error}")
         st.stop()
 
 if "messages" not in st.session_state:

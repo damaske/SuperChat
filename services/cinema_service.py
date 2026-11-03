@@ -116,6 +116,14 @@ class CinemaService:
 
         return showtime
 
+    def get_available_seats(self, session, showtime_id):
+        seats = self.cinema_repository.get_available_seats(showtime_id)
+        if seats is not None:
+            for item in session.cinema.showtimes:
+                if str(item["showtime"]["id"]) == str(showtime_id):
+                    item["showtime"]["seats_available"] = seats
+        return seats
+
     def reserve_selected_showtime(self, session, seats=1):
         """Create a mock cinema reservation without payment."""
 
@@ -131,6 +139,15 @@ class CinemaService:
             return {
                 "success": False,
                 "message": "Please select a showtime first."
+            }
+
+        if showtime.get("external"):
+            return {
+                "success": False,
+                "message": (
+                    "CinemaPlus booking is not available through this public "
+                    "read-only integration. Use the official CinemaPlus site."
+                ),
             }
 
         if showtime["seats_available"] < seats:

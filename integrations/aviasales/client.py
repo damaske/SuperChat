@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any
 
 import httpx
@@ -17,7 +18,7 @@ class AviasalesClient:
     BASE_URL = "https://api.travelpayouts.com"
     DATA_API_TOKEN_VARIABLE = "AVIASALES_API_TOKEN"
 
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 30.0, cache_ttl: float = 60.0):
         load_dotenv()
         self.token = os.getenv(self.DATA_API_TOKEN_VARIABLE)
         if not self.token:
@@ -25,23 +26,35 @@ class AviasalesClient:
                 f"{self.DATA_API_TOKEN_VARIABLE} is not configured."
             )
         self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self._cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        try:
-            response = httpx.get(
-                f"{self.BASE_URL}{path}",
-                headers={"X-Access-Token": self.token},
-                params=params,
-                timeout=self.timeout,
-            )
-        except httpx.TimeoutException as error:
-            raise AviasalesAPIError(
-                "Aviasales request timed out."
-            ) from error
-        except httpx.RequestError as error:
-            raise AviasalesAPIError(
-                "Aviasales is unavailable."
-            ) from error
+        cache_key = (path, tuple(sorted(params.items())))
+        cached = self._cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < self.cache_ttl:
+            return cached[1]
+
+        response = None
+        for attempt in range(2):
+            try:
+                response = httpx.get(
+                    f"{self.BASE_URL}{path}",
+                    headers={"X-Access-Token": self.token},
+                    params=params,
+                    timeout=self.timeout,
+                )
+            except httpx.TimeoutException as error:
+                raise AviasalesAPIError(
+                    "Aviasales request timed out."
+                ) from error
+            except httpx.RequestError as error:
+                raise AviasalesAPIError(
+                    "Aviasales is unavailable."
+                ) from error
+            if response.status_code != 429 or attempt == 1:
+                break
+            time.sleep(0.2)
 
         if response.status_code in {401, 403}:
             raise AviasalesAPIError(
@@ -74,6 +87,7 @@ class AviasalesClient:
                 "Aviasales did not find valid data for this request.",
                 response.status_code,
             )
+        self._cache[cache_key] = (time.monotonic(), payload)
         return payload
 
     def prices_for_dates(

@@ -79,6 +79,38 @@ def test_empty_results():
             assert repository.search(query="missing item") == []
 
 
+def test_category_brand_and_stock_constraints_are_applied():
+    product = {**PRODUCT, "stock": 3}
+    response = FakeResponse(payload={"organic_results": [product]})
+    with patch("integrations.serpapi.client.httpx.get", return_value=response) as get:
+        with patch.dict(os.environ, {"SERPAPI_API_KEY": "test-key"}):
+            repository = SerpApiProductRepository(SerpApiClient())
+            results = repository.search(
+                query="headphones",
+                category="audio",
+                brand="Example",
+                in_stock=True,
+            )
+
+    assert results
+    assert get.call_args.kwargs["params"]["_nkw"] == "headphones audio Example"
+
+    product_without_stock = {**PRODUCT, "stock": None}
+    response = FakeResponse(
+        payload={"organic_results": [product_without_stock]}
+    )
+    with patch("integrations.serpapi.client.httpx.get", return_value=response):
+        with patch.dict(os.environ, {"SERPAPI_API_KEY": "test-key"}):
+            repository = SerpApiProductRepository(SerpApiClient())
+            assert repository.search(query="headphones", in_stock=True) == []
+
+    response = FakeResponse(payload={"organic_results": [product_without_stock]})
+    with patch("integrations.serpapi.client.httpx.get", return_value=response):
+        with patch.dict(os.environ, {"SERPAPI_API_KEY": "test-key"}):
+            repository = SerpApiProductRepository(SerpApiClient())
+            assert repository.search(query="headphones", in_stock=False)
+
+
 def test_missing_key():
     with patch("integrations.serpapi.client.load_dotenv"):
         with patch.dict(os.environ, {}, clear=True):
@@ -126,6 +158,7 @@ def test_timeout():
 if __name__ == "__main__":
     test_search_parameters_and_normalization()
     test_empty_results()
+    test_category_brand_and_stock_constraints_are_applied()
     test_missing_key()
     test_invalid_response_and_http_errors()
     test_timeout()

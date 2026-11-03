@@ -49,6 +49,7 @@ class ExtractedEntities(BaseModel):
     min_rating: float | None = None
     in_stock: bool | None = None
     condition: str | None = None
+    sort: str | None = None
 
     # Cinema
     genre: str | None = None
@@ -170,7 +171,7 @@ Rules:
 
     Shopping:
     Use product-related fields such as query, product_category,
-    brand, color, condition, min_rating, in_stock and max_price.
+    brand, color, condition, min_rating, in_stock, sort and max_price.
 
     Cinema:
     Use cinema-related fields such as genre, movie_language,
@@ -638,7 +639,6 @@ class LLMRouter:
             message,
             current_date
         )
-
         if resolved_date is None:
             return
 
@@ -656,6 +656,87 @@ class LLMRouter:
                     "Указанная дата уже прошла. "
                     "Уточните, пожалуйста, нужную дату."
                 )
+
+    @staticmethod
+    def _fallback_decision(message: str, session, current_date: date) -> RouteDecision:
+        """Recover routing when Groq cannot produce structured JSON."""
+        text = message.lower()
+        context = LLMRouter._get_session_context(session)
+        active = context.get("last_active_domain")
+
+        cinema_terms = (
+            "cinema", "movie", "film", "showtime", "session", "ticket",
+            "кино", "фильм", "сеанс", "кинотеатр", "билет",
+            "film", "filmlər", "kino", "seans", "kinoteatr", "bilet",
+        )
+        shopping_terms = (
+            "shop", "product", "buy", "товар", "куп", "магазин",
+            "məhsul", "alış", "qulaqlıq", "qulaqlıqlar", "simsiz",
+        )
+        flight_terms = (
+            "flight", "fly", "airport", "рейс", "перелет", "авиабилет",
+            "uçuş", "uçuşları", "hava limanı",
+        )
+
+        if any(term in text for term in cinema_terms):
+            domain = "cinema"
+        elif any(term in text for term in shopping_terms):
+            domain = "shopping"
+        elif any(term in text for term in flight_terms):
+            domain = "flights"
+        elif active in {"cinema", "shopping", "flights"}:
+            domain = active
+        else:
+            return RouteDecision(
+                category="Ambiguous",
+                intent="clarify",
+                language="unknown",
+                entities=ExtractedEntities(),
+                clarification_question=(
+                    "Please clarify whether you need flights, products, or cinema."
+                ),
+            )
+
+        entities = ExtractedEntities()
+        intent = "follow_up" if active == domain else "search"
+        category = "Follow-up" if active == domain else domain.title()
+
+        if domain == "cinema":
+            intent = "search_showtimes" if any(
+                term in text for term in (
+                    "showtime", "session", "сеанс", "playing", "playing at"
+                )
+            ) or "cinema" in text or "кинотеатр" in text else "search_movies"
+            previous = context.get("cinema_search_params", {})
+            entities.cinema_name = previous.get("cinema_name")
+            entities.movie_title = previous.get("movie_title")
+            resolved = resolve_date_from_message(message, current_date)
+            if resolved:
+                entities.showtime_date = resolved.isoformat()
+            if "tomorrow" in text or "завтра" in text:
+                entities.showtime_date = (current_date + timedelta(days=1)).isoformat()
+            if "cheaper" in text or "дешев" in text:
+                intent = "search_showtimes"
+            if "seat" in text or "мест" in text:
+                intent = "search_showtimes"
+            at_match = re.search(r"\bat\s+(.+)$", text)
+            if at_match:
+                suffix = at_match.group(1).strip(" ?.")
+                if suffix:
+                    entities.cinema_name = suffix
+            category = "Follow-up" if active == "cinema" else "Cinema"
+
+        return RouteDecision(
+            category=category,
+            domains=[domain],
+            intent=intent,
+            language=(
+                "az" if re.search(r"[əıöüğşç]", text)
+                else "ru" if re.search(r"[а-яё]", text)
+                else "en"
+            ),
+            entities=entities,
+        )
 
     def classify(
         self,
@@ -716,10 +797,30 @@ class LLMRouter:
                 ) from error
 
             if error.status_code == 400:
-                raise RuntimeError(
-                    "Groq rejected the structured routing response. "
-                    "Please retry."
-                ) from error
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {
+                                "role": "user",
+                                "content": json.dumps(
+                                    user_payload,
+                                    ensure_ascii=False,
+                                    default=str,
+                                ),
+                            },
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0,
+                        max_tokens=self.MAX_OUTPUT_TOKENS,
+                    )
+                except (APIStatusError, APITimeoutError):
+                    return self._fallback_decision(
+                        message,
+                        session,
+                        current_date,
+                    )
 
             raise RuntimeError(
                 f"Groq routing request failed with HTTP "
@@ -732,39 +833,29 @@ class LLMRouter:
             ) from error
 
         if not completion.choices:
-            raise RuntimeError(
-                "Groq returned an empty completion."
-            )
+            return self._fallback_decision(message, session, current_date)
 
         response_message = completion.choices[0].message
 
         if response_message.refusal:
-            raise RuntimeError(
-                f"LLM refused the request: {response_message.refusal}"
-            )
+            return self._fallback_decision(message, session, current_date)
 
         content = response_message.content
 
         if not content:
-            raise RuntimeError(
-                "Groq returned an empty structured response."
-            )
+            return self._fallback_decision(message, session, current_date)
 
         try:
             parsed_payload = json.loads(content)
 
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                "Groq returned invalid JSON."
-            ) from error
+        except json.JSONDecodeError:
+            return self._fallback_decision(message, session, current_date)
 
         try:
             decision = RouteDecision.model_validate(parsed_payload)
 
-        except ValidationError as error:
-            raise RuntimeError(
-                f"Groq response failed Pydantic validation: {error}"
-            ) from error
+        except ValidationError:
+            return self._fallback_decision(message, session, current_date)
 
         # Remove duplicate domains while preserving their order.
         decision.domains = list(

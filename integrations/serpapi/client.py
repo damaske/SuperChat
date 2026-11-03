@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any
 
 import httpx
@@ -17,7 +18,7 @@ class SerpApiClient:
     BASE_URL = "https://serpapi.com/search"
     API_KEY_VARIABLE = "SERPAPI_API_KEY"
 
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 30.0, cache_ttl: float = 60.0):
         load_dotenv()
         self.api_key = os.getenv(self.API_KEY_VARIABLE)
         if not self.api_key:
@@ -25,6 +26,8 @@ class SerpApiClient:
                 f"{self.API_KEY_VARIABLE} is not configured."
             )
         self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self._cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
 
     def search_ebay(
         self,
@@ -66,16 +69,26 @@ class SerpApiClient:
                 "price_high_to_low": "16",
             }[sort]
 
-        try:
-            response = httpx.get(
-                self.BASE_URL,
-                params=params,
-                timeout=self.timeout,
-            )
-        except httpx.TimeoutException as error:
-            raise SerpApiError("SerpApi request timed out.") from error
-        except httpx.RequestError as error:
-            raise SerpApiError("SerpApi is unavailable.") from error
+        cache_key = tuple(sorted(params.items()))
+        cached = self._cache.get(cache_key)
+        if cached and time.monotonic() - cached[0] < self.cache_ttl:
+            return cached[1]
+
+        response = None
+        for attempt in range(2):
+            try:
+                response = httpx.get(
+                    self.BASE_URL,
+                    params=params,
+                    timeout=self.timeout,
+                )
+            except httpx.TimeoutException as error:
+                raise SerpApiError("SerpApi request timed out.") from error
+            except httpx.RequestError as error:
+                raise SerpApiError("SerpApi is unavailable.") from error
+            if response.status_code != 429 or attempt == 1:
+                break
+            time.sleep(0.2)
 
         if response.status_code in {401, 403}:
             raise SerpApiError(
@@ -102,4 +115,5 @@ class SerpApiClient:
             raise SerpApiError("SerpApi returned an invalid response.")
         if payload.get("error"):
             raise SerpApiError("SerpApi returned an API error.")
+        self._cache[cache_key] = (time.monotonic(), payload)
         return payload

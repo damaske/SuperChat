@@ -26,8 +26,14 @@ class SerpApiProductRepository:
         if not query:
             raise SerpApiError("A product search query is required.")
 
+        query_parts = [query]
+        if category:
+            query_parts.append(category)
+        if brand:
+            query_parts.append(brand)
+
         payload = self.client.search_ebay(
-            query=query,
+            query=" ".join(query_parts),
             min_price=min_price,
             max_price=max_price,
             sort=sort,
@@ -45,6 +51,12 @@ class SerpApiProductRepository:
                 or product["rating"] < min_rating
             ):
                 continue
+            if in_stock is True:
+                stock = product.get("stock")
+                if not isinstance(stock, (int, float)):
+                    continue
+                if stock <= 0:
+                    continue
             products.append(product)
 
         self._products = {product["id"]: product for product in products}
